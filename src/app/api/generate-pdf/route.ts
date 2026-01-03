@@ -1,5 +1,6 @@
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import type { NextRequest } from "next/server";
+import type { BoardCellDef, CellVariant } from "@/lib/board-types";
 
 // If you ever hit Edge-runtime issues with pdf-lib, uncomment this:
 // export const runtime = "nodejs";
@@ -24,6 +25,12 @@ type ParsedDoc =
       overBudgetReason?: string;
     }
   | Recommendation[];
+
+type BoardRequest = {
+  type: "board";
+  cells: BoardCellDef[];
+  values: Record<string, string>;
+};
 
 function isPlainObject(v: unknown): v is Record<string, any> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -164,9 +171,279 @@ function normalizeInput(body: any): { doc?: any; rawText?: string } {
   return { rawText: typeof body === "string" ? body : JSON.stringify(body, null, 2) };
 }
 
+/**
+ * Get the color for a cell variant
+ */
+function getVariantColor(variant: CellVariant | undefined): { bg: ReturnType<typeof rgb>; text: ReturnType<typeof rgb> } {
+  switch (variant) {
+    case "section":
+    case "goal":
+    case "accent":
+      // Maroon background (#7a0f0f), white text
+      return { bg: rgb(0.478, 0.059, 0.059), text: rgb(1, 1, 1) };
+    case "ref":
+      // White with emerald border - we'll handle this specially
+      return { bg: rgb(1, 1, 1), text: rgb(0.1, 0.1, 0.1) };
+    case "plain":
+    default:
+      return { bg: rgb(1, 1, 1), text: rgb(0.1, 0.1, 0.1) };
+  }
+}
+
+/**
+ * Generate a PDF for the Harada board
+ */
+async function generateBoardPdf(body: BoardRequest): Promise<Uint8Array> {
+  const { cells, values } = body;
+
+  const pdfDoc = await PDFDocument.create();
+  
+  // Use landscape A4 for better grid display
+  const PAGE_W = 842; // A4 landscape
+  const PAGE_H = 595;
+  const margin = 20; // Small margin for the grid
+  
+  const page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+  const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const helveticaBoldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  
+  // Grid fills nearly the entire page
+  const gridStartY = PAGE_H - margin;
+  const gridStartX = margin;
+  const gridWidth = PAGE_W - 2 * margin;
+  const gridHeight = PAGE_H - 2 * margin;
+  
+  const cols = 9;
+  const rows = 9;
+  const cellWidth = gridWidth / cols;
+  const cellHeight = gridHeight / rows;
+  const cellPadding = 4;
+  const gap = 1; // Gap between cells
+  
+  // Create a lookup map for cells by position
+  const cellMap = new Map<string, BoardCellDef>();
+  const coveredCells = new Set<string>();
+  
+  for (const cell of cells) {
+    const key = `${cell.row}-${cell.col}`;
+    cellMap.set(key, cell);
+    
+    // Mark cells covered by spanning cells
+    if (cell.rowSpan && cell.rowSpan > 1 || cell.colSpan && cell.colSpan > 1) {
+      const rowSpan = cell.rowSpan || 1;
+      const colSpan = cell.colSpan || 1;
+      for (let r = 0; r < rowSpan; r++) {
+        for (let c = 0; c < colSpan; c++) {
+          if (r !== 0 || c !== 0) {
+            coveredCells.add(`${cell.row + r}-${cell.col + c}`);
+          }
+        }
+      }
+    }
+  }
+  
+  // Draw grid background (for gap color)
+  page.drawRectangle({
+    x: gridStartX,
+    y: gridStartY - gridHeight,
+    width: gridWidth,
+    height: gridHeight,
+    color: rgb(0.8, 0.8, 0.8), // Light gray for gaps
+  });
+  
+  // Helper to wrap text within cell
+  function wrapText(text: string, maxWidth: number, font: typeof helveticaFont, fontSize: number): string[] {
+    const lines: string[] = [];
+    const paragraphs = text.split(/\n/);
+    
+    for (const paragraph of paragraphs) {
+      const words = paragraph.split(/\s+/).filter(w => w.length > 0);
+      if (words.length === 0) {
+        lines.push("");
+        continue;
+      }
+      
+      let currentLine = words[0];
+      
+      for (let i = 1; i < words.length; i++) {
+        const testLine = currentLine + " " + words[i];
+        const testWidth = font.widthOfTextAtSize(testLine, fontSize);
+        
+        if (testWidth <= maxWidth) {
+          currentLine = testLine;
+        } else {
+          lines.push(currentLine);
+          currentLine = words[i];
+        }
+      }
+      lines.push(currentLine);
+    }
+    
+    return lines;
+  }
+  
+  // Draw cells
+  for (let row = 1; row <= rows; row++) {
+    for (let col = 1; col <= cols; col++) {
+      const key = `${row}-${col}`;
+      
+      // Skip cells covered by spanning cells
+      if (coveredCells.has(key)) continue;
+      
+      const cell = cellMap.get(key);
+      if (!cell) continue;
+      
+      const rowSpan = cell.rowSpan || 1;
+      const colSpan = cell.colSpan || 1;
+      
+      // Calculate cell position and size
+      const x = gridStartX + (col - 1) * cellWidth + gap;
+      const y = gridStartY - row * cellHeight - (rowSpan - 1) * cellHeight + gap;
+      const w = cellWidth * colSpan - 2 * gap;
+      const h = cellHeight * rowSpan - 2 * gap;
+      
+      const { bg, text: textColor } = getVariantColor(cell.variant);
+      
+      // Draw cell background
+      page.drawRectangle({
+        x,
+        y,
+        width: w,
+        height: h,
+        color: bg,
+      });
+      
+      // Draw emerald border for ref variant
+      if (cell.variant === "ref") {
+        page.drawRectangle({
+          x,
+          y,
+          width: w,
+          height: h,
+          borderColor: rgb(0.2, 0.78, 0.55), // Emerald
+          borderWidth: 2,
+        });
+      }
+      
+      // Draw cell content
+      const content = values[cell.id] || "";
+      if (content) {
+        const isGoal = cell.variant === "goal";
+        const fontSize = isGoal ? 10 : 7;
+        const font = isGoal ? helveticaBoldFont : helveticaFont;
+        
+        const textMaxWidth = w - 2 * cellPadding;
+        const lines = wrapText(content, textMaxWidth, font, fontSize);
+        const lineHeight = fontSize * 1.3;
+        
+        // Calculate total text height
+        const totalTextHeight = lines.length * lineHeight;
+        
+        // Center text vertically
+        let textY = y + h / 2 + totalTextHeight / 2 - fontSize;
+        
+        // Make sure text doesn't overflow vertically
+        const maxLines = Math.floor((h - 2 * cellPadding) / lineHeight);
+        const displayLines = lines.slice(0, maxLines);
+        
+        for (const line of displayLines) {
+          const lineWidth = font.widthOfTextAtSize(line, fontSize);
+          const textX = x + (w - lineWidth) / 2; // Center horizontally
+          
+          if (textY > y + cellPadding && textY < y + h - cellPadding) {
+            page.drawText(line, {
+              x: textX,
+              y: textY,
+              size: fontSize,
+              font,
+              color: textColor,
+            });
+          }
+          textY -= lineHeight;
+        }
+        
+        // Show ellipsis if text was truncated
+        if (lines.length > maxLines) {
+          const ellipsis = "...";
+          const ellipsisWidth = font.widthOfTextAtSize(ellipsis, fontSize);
+          page.drawText(ellipsis, {
+            x: x + (w - ellipsisWidth) / 2,
+            y: y + cellPadding,
+            size: fontSize,
+            font,
+            color: textColor,
+          });
+        }
+      }
+    }
+  }
+  
+  // Draw macro-square borders (3x3 grid sections)
+  const macroLineWidth = 2;
+  const macroColor = rgb(0.478, 0.059, 0.059); // Maroon
+  
+  for (let i = 1; i < 3; i++) {
+    // Vertical lines
+    const vx = gridStartX + i * 3 * cellWidth;
+    page.drawLine({
+      start: { x: vx, y: gridStartY },
+      end: { x: vx, y: gridStartY - gridHeight },
+      thickness: macroLineWidth,
+      color: macroColor,
+    });
+    
+    // Horizontal lines
+    const hy = gridStartY - i * 3 * cellHeight;
+    page.drawLine({
+      start: { x: gridStartX, y: hy },
+      end: { x: gridStartX + gridWidth, y: hy },
+      thickness: macroLineWidth,
+      color: macroColor,
+    });
+  }
+  
+  // Draw outer border
+  page.drawRectangle({
+    x: gridStartX,
+    y: gridStartY - gridHeight,
+    width: gridWidth,
+    height: gridHeight,
+    borderColor: macroColor,
+    borderWidth: macroLineWidth,
+  });
+  
+  return pdfDoc.save();
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    
+    // Check if this is a board export request
+    if (body.type === "board" && Array.isArray(body.cells) && body.values) {
+      const pdfBytes = await generateBoardPdf(body as BoardRequest);
+      
+      // Generate filename
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, "0");
+      const day = String(now.getDate()).padStart(2, "0");
+      const hours = String(now.getHours()).padStart(2, "0");
+      const minutes = String(now.getMinutes()).padStart(2, "0");
+      const timestamp = `${year}${month}${day}-${hours}${minutes}`;
+      const filename = `${timestamp}-harada-board.pdf`;
+      
+      const arrayBuffer = new Uint8Array(pdfBytes).buffer;
+      
+      return new Response(arrayBuffer, {
+        headers: {
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `attachment; filename="${filename}"`,
+        },
+      });
+    }
+    
+    // Original recommendations PDF logic
     const { doc, rawText } = normalizeInput(body);
 
     // Build structured view: recommendations + summary
@@ -577,4 +854,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-

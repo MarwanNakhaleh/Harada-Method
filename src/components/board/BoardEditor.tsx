@@ -36,6 +36,7 @@ export default function BoardEditor() {
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [helpQuestion, setHelpQuestion] = useState("");
   const [isLoadingHelp, setIsLoadingHelp] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   // Check if this is a new user (has never opened the app before)
   useEffect(() => {
@@ -122,6 +123,49 @@ export default function BoardEditor() {
     }
     setShowHelpModal(true);
     setHelpQuestion("");
+  }
+
+  async function handleExportPdf() {
+    setIsExportingPdf(true);
+    try {
+      const response = await fetch("/api/generate-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "board",
+          cells: defaultBoardCells,
+          values,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to generate PDF");
+      }
+
+      // Get the filename from Content-Disposition header if available
+      const contentDisposition = response.headers.get("Content-Disposition");
+      let filename = "harada-board.pdf";
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename="?([^"]+)"?/);
+        if (match) filename = match[1];
+      }
+
+      // Download the PDF
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Error exporting PDF:", error);
+      alert("Failed to export PDF. Please try again.");
+    } finally {
+      setIsExportingPdf(false);
+    }
   }
 
   async function handleHelpSubmit() {
@@ -339,6 +383,14 @@ export default function BoardEditor() {
               className="rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-neutral-50"
             >
               Reset All Data
+            </button>
+            <button
+              type="button"
+              onClick={handleExportPdf}
+              disabled={isExportingPdf}
+              className="rounded-md border border-emerald-600 bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isExportingPdf ? "Exporting..." : "Export PDF"}
             </button>
           </div>
         </div>
