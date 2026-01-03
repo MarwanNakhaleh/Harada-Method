@@ -8,6 +8,9 @@ import type { CellVariant } from "@/lib/board-types";
 const BOARD_DATA_STORAGE_KEY = "harada.board.v1";
 const NEW_USER_STORAGE_KEY = "harada.newUser";
 
+// Feature flag for the initial questionnaire modal
+const ENABLE_INITIAL_QUESTIONNAIRE = process.env.NEXT_PUBLIC_ENABLE_INITIAL_QUESTIONNAIRE === "true";
+
 // Modal questions - easy to add or remove questions here
 const MODAL_QUESTIONS = [
   "Are you already familiar with the Harada Method?",
@@ -39,7 +42,9 @@ export default function BoardEditor() {
   const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   // Check if this is a new user (has never opened the app before)
+  // Only runs if ENABLE_INITIAL_QUESTIONNAIRE is true
   useEffect(() => {
+    if (!ENABLE_INITIAL_QUESTIONNAIRE) return;
     if (typeof window === "undefined") return;
 
     try {
